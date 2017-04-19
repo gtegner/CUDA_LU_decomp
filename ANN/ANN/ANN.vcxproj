@@ -152,6 +152,7 @@ copy "$(CudaToolkitBinDir)\cudart*.dll" "$(OutDir)"</Command>
   </ItemDefinitionGroup>
   <ItemGroup>
     <CudaCompile Include="kernel.cu" />
+    <CudaCompile Include="LUdecompostion.cu" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="matrix_cpu.cpp" />
