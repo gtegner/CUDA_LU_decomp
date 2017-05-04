@@ -26,6 +26,20 @@ int __shfl_down(int var, unsigned int delta, int width = warpSize);
 
 using namespace std;
 
+ostream& operator<<(ostream& out, pair<int, double**> mat)
+{
+	int m = mat.first;
+	double** arr = mat.second;
+
+	cout << setprecision(5) << fixed << endl;
+	for (int i = 0; i < m; i++) {
+		for (int j = 0; j < m; j++) {
+			cout << arr[i][j] << (j + 1 < m ? ",\t" : "\n");
+		}
+	}
+	return out;
+}
+
 #define check(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort = true)
 {
@@ -111,8 +125,9 @@ __global__ void maxColumn(double ** __restrict__ mat, const int c, const int N, 
 		mat[max_i] = mat[c];
 		mat[c] = tmp;
 
+		// printf("max_i %i, P[c] %i, P[max_i] %i \n", max_i, P[c], P[max_i]);
 		int itmp = P[c];
-		P[c] = max_i;
+		P[c] = P[max_i];
 		P[max_i] = itmp;
 	}
 }
@@ -161,9 +176,10 @@ __global__ void L_substitution(double ** __restrict__ mat, double* __restrict__ 
 	int numThreads = blockDim.x * gridDim.x;
 	int I = threadIdx.x + blockIdx.x * blockDim.x;
 
-	for (int i = I; i < N; i += numThreads) {
-		_b[i] = b[i];
-	}
+	//for (int i = I; i < N; i += numThreads) {
+	//	printf("%i %f, ", i, b[i]);
+	//	_b[i] = b[i];
+	//}
 
 	// on diagonal there are ones which are however not saved
 	for (int j = 0; j < N; j++) {
@@ -174,6 +190,7 @@ __global__ void L_substitution(double ** __restrict__ mat, double* __restrict__ 
 	}
 
 	for (int i = I; i < N; i += numThreads) {
+		// printf("%i %f, ",i, _b[i]);
 		b[i] = _b[i];
 	}
 }
@@ -206,15 +223,23 @@ __global__ void U_substitution(double ** __restrict__ mat, double* __restrict__ 
 
 __global__ void permute(double* d_b, const int* P, int const N) {
 
+	extern __shared__ double _b[];
 
 	int numThreads = blockDim.x * gridDim.x;
 	int I = threadIdx.x + blockIdx.x * blockDim.x;
 
+	//for (int i = I; i < N; i += numThreads) {
+	//	printf("%i %f ", i, d_b[i]);
+	//}
+	// printf("\n ");
+
 	for (int i = I; i < N; i += numThreads) {
+		// printf("I=%i, i=%i, P[i]=%i, %f \n", I, i, P[i], d_b[P[i]]);
+		_b[i] = d_b[P[i]];
+	}
 
-		int index = P[i];
-		d_b[i] = d_b[index];
-
+	for (int i = I; i < N; i += numThreads) {
+		d_b[i] = _b[i];
 	}
 }
 
@@ -235,51 +260,47 @@ void LU_decompostion(double** mat, const int N, double** &d_mat, int* &P) {
 		check(cudaMemcpyAsync(&(d_mat[i]), &(mat[i]), N, cudaMemcpyHostToDevice));
 	}
 
+	cudaDeviceSynchronize();
+
 	unsigned int num_threads = min(256, N);
 	unsigned int num_blocks = (N + num_threads - 1) / num_threads;
 	dim3 threadsGrid = dim3(16, 16);
 
 	for (int i = 0; i < N; i++) {
-		maxColumn<<<1, 1024>>>(mat, i, N, P);
-		compute_L_column<<<num_blocks, num_threads>>>(mat, i, N);
+		maxColumn<<<1, 1024>>>(d_mat, i, N, P);
+		compute_L_column<<<num_blocks, num_threads>>>(d_mat, i, N);
 		
 		int dim = (N + 16 - 1) / 16;
 		dim3 blockgrid = dim3(dim, dim);
-		reduce<<<blockgrid, threadsGrid>>>(mat, i, N);
-	}
+		reduce<<<blockgrid, threadsGrid>>>(d_mat, i, N);
 
+		//cudaDeviceSynchronize();
+		//auto Mat = make_pair(N, d_mat);
+		//cout << endl << Mat << endl;
+		//for (int i = 0; i < N; i++) {
+		//	printf("%i, ", P[i]);
+		//} printf("\n");
+	}
 }
 
 // deconstructs b during execution
 // assume d_mat and d_P are device pointer
 void inline solve_LU(double** d_mat, int* d_P, double* b, const int N) {
 	double* d_b;
-	check(cudaMalloc(&d_b, N * sizeof(double)));
-	check(cudaMemcpy(&d_b, &b, N, cudaMemcpyHostToDevice));
+	check(cudaMallocManaged(&d_b, N * sizeof(double)));
+	check(cudaMemcpy(d_b, b, N * sizeof(double), cudaMemcpyDefault));
 
 	unsigned int num_threads = min(256, N);
 	unsigned int num_blocks = (N + num_threads - 1) / num_threads;
 
-	permute << <num_blocks, num_threads >> >(d_b, d_P, N);
+	permute<<<num_blocks, num_threads, N * sizeof(double)>>>(d_b, d_P, N);
+	cudaDeviceSynchronize();
 
 	L_substitution<<<num_blocks, num_threads, N * sizeof(double) >>>(d_mat, d_b, N);
 	U_substitution<<<num_blocks, num_threads, N * sizeof(double) >>>(d_mat, d_b, N);
+	cudaDeviceSynchronize();
 
-	check(cudaMemcpy(&b, &d_b, N, cudaMemcpyDeviceToHost));
-}
-
-ostream& operator<<(ostream& out, pair<int, double**> mat)
-{
-	int m = mat.first;
-	double** arr = mat.second;
-
-	cout << setprecision(5) << fixed << endl;
-	for (int i = 0; i < m; i++) {
-		for (int j = 0; j < m; j++) {
-			cout << arr[i][j] << (j + 1 < m ? ",\t" : "\n");
-		}
-	}
-	return out;
+	check(cudaMemcpy(b, d_b, N * sizeof(double), cudaMemcpyDefault));
 }
 
 void test_maxColumn(double ** __restrict__ mat, const int c, const int N, int* P) {
@@ -331,13 +352,15 @@ void test_LU_decomp(double ** __restrict__ mat, int N) {
 	LU_decompostion(mat, N, d_mat, P);
 
 	cudaDeviceSynchronize();
-	auto Mat = make_pair(N, mat);
+	auto Mat = make_pair(N, d_mat);
 	cout << endl << Mat << endl;
 
 	double* b = (double*) calloc(sizeof(double), N);
 	for (int i = 0; i < N; i++) {
 		b[i] = i;
 	}
+
+	cudaDeviceSynchronize();
 
 	solve_LU(d_mat, P, b, N);
 	cudaDeviceSynchronize();
