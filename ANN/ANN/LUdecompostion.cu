@@ -16,6 +16,8 @@
 #include <algorithm> 
 #include <iostream>
 #include <iomanip>
+#include <curand.h>
+#include <ctime>
 
 #pragma once
 #ifdef __INTELLISENSE__
@@ -46,6 +48,15 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort =
 	if (code != cudaSuccess)
 	{
 		fprintf(stderr, "GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
+		if (abort) exit(code);
+	}
+}
+
+#define r_check(ans) { curandAssert((ans)); }
+inline void curandAssert(curandStatus_t code, bool abort = true)
+{
+	if (code != CURAND_STATUS_SUCCESS)
+	{
 		if (abort) exit(code);
 	}
 }
@@ -221,6 +232,7 @@ __global__ void U_substitution(double ** __restrict__ mat, double* __restrict__ 
 	}
 }
 
+// Run with 1 Block 1024 Threads only please!
 __global__ void permute(double* d_b, const int* P, int const N) {
 
 	extern __shared__ double _b[];
@@ -243,21 +255,22 @@ __global__ void permute(double* d_b, const int* P, int const N) {
 	}
 }
 
-void LU_decompostion(double** mat, const int N, double** &d_mat, int* &P) {
+void LU_decompostion(double** d_mat, const int N, int* &P) {
 
-	check(cudaMallocManaged(&d_mat, N * sizeof(double*)));
-	for (int i = 0; i < N; i++) {
-		// cudaMalloc
-		check(cudaMallocManaged(&(d_mat[i]), N * sizeof(double)));
-	}
+	//check(cudaMallocManaged(&d_mat, N * sizeof(double*)));
+	//for (int i = 0; i < N; i++) {
+	//	// cudaMalloc
+	//	check(cudaMallocManaged(&(d_mat[i]), N * sizeof(double)));
+	//}
+
+	//for (int i = 0; i < N; i++) {
+	//	check(cudaMemcpyAsync(&(d_mat[i]), &(mat[i]), N, cudaMemcpyHostToDevice));
+	//}
+
 
 	check(cudaMallocManaged(&P, N * sizeof(int)));
 	for (int i = 0; i < N; i++) {
 		P[i] = i;
-	}
-
-	for (int i = 0; i < N; i++) {
-		check(cudaMemcpyAsync(&(d_mat[i]), &(mat[i]), N, cudaMemcpyHostToDevice));
 	}
 
 	cudaDeviceSynchronize();
@@ -293,7 +306,7 @@ void inline solve_LU(double** d_mat, int* d_P, double* b, const int N) {
 	unsigned int num_threads = min(256, N);
 	unsigned int num_blocks = (N + num_threads - 1) / num_threads;
 
-	permute<<<num_blocks, num_threads, N * sizeof(double)>>>(d_b, d_P, N);
+	permute<<<1, 1024, N * sizeof(double)>>>(d_b, d_P, N);
 	cudaDeviceSynchronize();
 
 	L_substitution<<<num_blocks, num_threads, N * sizeof(double) >>>(d_mat, d_b, N);
@@ -325,31 +338,30 @@ void test_L_column(double ** __restrict__ mat, const int c, const int N) {
 
 }
 
-void test_reduce(double ** __restrict__ mat, const int c, const int N) {
+void test_reduce(double ** __restrict__ d_mat, const int c, const int N) {
 	int* P;
 	check(cudaMallocManaged(&P, N * sizeof(int)));
 	for (int i = 0; i < N; i++) {
 		P[i] = i;
 	}
 
-	test_maxColumn(mat, c, N, P);
-	test_L_column(mat, c, N);
+	test_maxColumn(d_mat, c, N, P);
+	test_L_column(d_mat, c, N);
 
 	dim3 threadsGrid = dim3(4, 4);
 	int dim = (N + 4 - 1) / 4;
 	dim3 blockgrid = dim3(dim, dim);
 
-	reduce<<<blockgrid, threadsGrid >>>(mat, c, N);
+	reduce<<<blockgrid, threadsGrid >>>(d_mat, c, N);
 
 	cudaDeviceSynchronize();
-	auto Mat = make_pair(N, mat);
+	auto Mat = make_pair(N, d_mat);
 	cout << endl << Mat << endl;
 }
 
-void test_LU_decomp(double ** __restrict__ mat, int N) {
-	double** d_mat;
+void test_LU_decomp(double ** __restrict__ d_mat, int N) {
 	int* P;
-	LU_decompostion(mat, N, d_mat, P);
+	LU_decompostion(d_mat, N, P);
 
 	cudaDeviceSynchronize();
 	auto Mat = make_pair(N, d_mat);
@@ -371,7 +383,7 @@ void test_LU_decomp(double ** __restrict__ mat, int N) {
 
 }
 
-int main() {
+void run_testsuit() {
 	const int N = 5;
 
 	//double mat_[N][N] = {{ 1,2,3 }, 
@@ -380,7 +392,7 @@ int main() {
 
 
 	double mat_[N][N] = { { 17,24, 1, 8,15 },
-						  { 23, 5, 7,14,16 },
+					      { 23, 5, 7,14,16 },
 						  {  4, 6,13,20,22 },
 						  { 10,12,19,21, 3 },
 						  { 11,18,25, 2, 9 } };
@@ -388,7 +400,7 @@ int main() {
 	check(cudaMallocManaged(&mat, sizeof(double*) * N));
 	for (int i = 0; i < N; i++) {
 		check(cudaMallocManaged(&(mat[i]), sizeof(double) * N))
-		// check(cudaMemcpy(mat[i], mat_[i], 3, cudaMemcpyHostToDevice));
+			// check(cudaMemcpy(mat[i], mat_[i], 3, cudaMemcpyHostToDevice));
 	}
 	for (int i = 0; i < N; i++) {
 		for (int j = 0; j < N; j++) {
@@ -396,13 +408,76 @@ int main() {
 		}
 	}
 
-	// auto Mat = make_pair(N, mat);
-	// cout << Mat << endl;
-
 	// test_maxColumn(mat, 2, N);
 	// test_L_column(mat, 0, N);
 	// test_reduce(mat, 0, N);
-	test_LU_decomp(mat, N);
+	// test_LU_decomp(mat, N);
+}
+
+void run_perfomance_test(const int N) {
+	double** mat;
+	check(cudaMallocManaged(&mat, sizeof(double*) * N));
+
+	curandGenerator_t gen;
+	r_check(curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT));
+	unsigned long int seed = static_cast<unsigned long int> (time(NULL));
+	r_check(curandSetPseudoRandomGeneratorSeed(gen, seed));
+
+	for (int i = 0; i < N; i++) {
+		check(cudaMallocManaged(&(mat[i]), sizeof(double) * N))
+		r_check(curandGenerateUniformDouble(gen, mat[i], N));
+		cudaDeviceSynchronize();
+	}
+
+	cudaEvent_t start, stop;
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+
+	int* P;
+	cudaEventRecord(start);
+
+	LU_decompostion(mat, N, P);
+
+	cudaEventRecord(stop);
+	cudaEventSynchronize(stop);
+	float milliseconds = 0;
+	cudaEventElapsedTime(&milliseconds, start, stop);
+	
+	cout << "Time " << milliseconds << " for matrix of size " << N << "x" << N << endl;
+
+	// FREE
+	r_check(curandDestroyGenerator(gen));
+
+	for (int i = 0; i < N; i++) {
+		check(cudaFree(mat[i]));
+	}
+	check(cudaFree(mat));
+
+	return;
+}
+
+
+int main() {
+	
+	//run_perfomance_test(100);
+	//run_perfomance_test(300);
+	//run_perfomance_test(900);
+	//run_perfomance_test(900 * 2);
+	//run_perfomance_test(900 * 3);
+	//run_perfomance_test(900 * 4);
+	//run_perfomance_test(900 * 5);
+	//run_perfomance_test(900 * 6);
+
+	run_perfomance_test(50);
+	run_perfomance_test(50 * 2);
+	run_perfomance_test(50 * 3);
+	run_perfomance_test(50 * 4);
+	run_perfomance_test(50 * 5);
+	run_perfomance_test(50 * 6);
+	run_perfomance_test(50 * 7);
+	run_perfomance_test(50 * 8);
+	run_perfomance_test(50 * 9);
+	run_perfomance_test(50 * 10);
 
 	check(cudaDeviceReset());
 }
